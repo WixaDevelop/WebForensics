@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- WebForensics build scripts ------------------------------------------
+# Keep the source-controlled build scaffolding while still ignoring the
+# PyInstaller intermediate work directory and the dist output.
+!build/
+!build/build.ps1
+!build/webforensics.spec
+!build/installer.iss
+build/webforensics/
+build/WebForensics/
+
+# Local session DBs and per-machine artifacts.
+*.wfs
+case.key
+audit.log.jsonl
