@@ -12,11 +12,9 @@ All timestamps in the workbook are rendered in :data:`REPORT_TZ`
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urlparse
 
 from data.models import ARTIFACT_KINDS, ProfileBundle
 from exporters.base import ExporterBase
@@ -46,71 +44,110 @@ EXTRA_TABLES: tuple[str, ...] = (
     "tags",
 )
 
-# Per-extra friendly description shown as the banner of each sheet and on
-# the interpretation page (Spanish only).
 EXTRA_INTERPRETATIONS: dict[str, str] = {
     "search_terms": (
-        "Búsquedas del usuario: las palabras que el usuario tecleó en Google, Bing, DuckDuckGo, "
-        "YouTube, Twitter/X, Brave Search, etc. Reconstruidas a partir de las URLs del historial. "
-        "Cada fila incluye la consulta exacta, el motor usado y cuándo se hizo."
+        "Lista de TODO lo que se buscó en Google, Bing, DuckDuckGo, YouTube, Twitter/X, etc. "
+        "La app lee las URLs del historial, identifica cuáles son de un buscador y extrae "
+        "exactamente lo que se escribió en la cajita de búsqueda. "
+        "Ej: si se buscó 'precio iphone 15' en Google, aparece una fila con motor='google', "
+        "consulta='precio iphone 15' y la fecha de la búsqueda. "
+        "Es muy útil porque resume directamente QUÉ se andaba investigando, sin tener que leer "
+        "URLs largas en el historial."
     ),
     "accounts": (
-        "Cuentas detectadas: identidades online del usuario recuperadas de cookies y "
-        "LocalStorage/IndexedDB. Incluye IDs internos (c_user de Facebook, twid de Twitter, "
-        "google session, github user, discord snowflake…) y, cuando se pudo resolver, el handle "
-        "humano. Una fila aquí es prueba muy fuerte de cuenta activa."
+        "Cuentas en servicios online identificadas en este perfil de navegador. La app revisa "
+        "cookies y datos de los sitios buscando IDs conocidos. "
+        "Ej: si en Facebook está la cookie 'c_user=100012345', se registra una cuenta de "
+        "Facebook con ese ID; si en GitHub la cookie dice 'user_session=...', se registra el "
+        "usuario de GitHub. "
+        "La presencia de una cuenta aquí indica que en este navegador HABÍA tokens o cookies "
+        "de esa cuenta — no implica que la cuenta sea de la persona dueña del equipo (otra "
+        "persona pudo haber iniciado sesión en este navegador)."
     ),
     "messages": (
-        "Mensajes recuperados: chats que el usuario tenía abiertos en clientes web como "
-        "WhatsApp Web, Discord o Telegram Web. Best-effort — los mensajes vienen de IndexedDB y "
-        "no siempre se decodifican enteros. Cada fila tiene la app, el remitente, el contenido y "
-        "el momento."
+        "Mensajes de chat rescatados de aplicaciones web como WhatsApp Web, Discord, "
+        "Telegram Web, Slack y Microsoft Teams. Estas apps guardan los mensajes en una base de "
+        "datos interna del navegador (IndexedDB) para que aparezcan rápido al volver a entrar. "
+        "Ej: una fila con app='whatsapp', chat='Familia', remitente='Mamá' y body='nos vemos a "
+        "las 6' indica un mensaje que estaba almacenado localmente. "
+        "La recuperación es 'mejor esfuerzo' — a veces los mensajes salen incompletos porque la "
+        "estructura interna de IndexedDB es compleja."
     ),
     "tokens": (
-        "Tokens OAuth / JWT: tokens de autenticación encontrados en cookies o storage. Para los "
-        "JWT que se pudieron decodificar, se incluyen issuer, subject, scope y expiración. Un "
-        "token activo equivale a una sesión que se podría reabrir."
+        "Tokens de autenticación encontrados en este perfil. Un token es como un 'pase digital' "
+        "que el navegador lleva en cada petición para no tener que volver a pedir contraseña. "
+        "Es lo que hace que una app móvil te deje entrar sin loguear cada vez. "
+        "Ej: un token JWT decodificable puede revelar 'esto es de la cuenta manuel@ejemplo.com, "
+        "tiene permisos de lectura y expira el 2026-12-31'. "
+        "Que aparezca un token aquí NO le da acceso al revisor a esa cuenta — solo documenta "
+        "que en este navegador había uno."
     ),
     "user_agents": (
-        "User-Agent strings vistos: cadenas de identificación de navegador reconstruidas a partir "
-        "de cabeceras en caché o de Storage. Útil para detectar uso de modo privado, dispositivos "
-        "móviles secundarios, o automatización (bots / scrapers)."
+        "Cadenas con las que el navegador se identificó ante los servidores web. Sirven para "
+        "detectar uso desde DIFERENTES dispositivos o configuraciones. "
+        "Ej: 'Mozilla/5.0 (Windows NT 10.0; Win64) Chrome/120' = Chrome en Windows de 64 bits; "
+        "'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Safari' = Safari en iPhone. "
+        "Si en un mismo perfil aparecen User-Agents muy diferentes (escritorio + móvil), suele "
+        "indicar sincronización del navegador entre varios dispositivos."
     ),
     "findings": (
-        "Hallazgos anti-forenses: alertas del analizador heurístico. Incluye huecos en la línea "
-        "de tiempo, historial vacío con cookies sobrevivientes, hosts que solo aparecen en "
-        "registros recuperados, eventos con timestamps en el futuro, etc. severity = critical/high "
-        "amerita revisión inmediata."
+        "Alertas automáticas del 'detector de cosas raras' de la app. Revisa los datos buscando "
+        "patrones sospechosos. "
+        "Ej: si el historial tiene un hueco de varios días pero las cookies de sesión siguen "
+        "vivas, podría ser que alguien borró el historial pero olvidó cerrar sesión. "
+        "Otros ejemplos: URLs con fecha en el futuro, dominios que solo aparecen en filas "
+        "recuperadas, contadores en cero con cookies presentes. "
+        "Las filas con severidad 'Crítica' o 'Alta' son las que conviene revisar primero."
     ),
     "iocs": (
-        "Lista de IOCs (Indicators of Compromise) cargados en la sesión. Cada IOC es un valor "
-        "(dominio, URL, hash, IP, email, username) con su severidad. La hoja 'IOC hits' muestra "
-        "qué artefactos del navegador coincidieron con cada IOC."
+        "Lista de IOCs (Indicadores de Compromiso) que el analista cargó en la sesión ANTES "
+        "del análisis. Son 'valores malos conocidos' — por ejemplo, una lista de dominios "
+        "asociados a malware, de IPs de servidores de control de botnets, o de huellas SHA-256 "
+        "de archivos peligrosos. "
+        "Ej: el analista carga la lista 'evil-domains.csv' que contiene 500 dominios sospechosos; "
+        "esta hoja muestra esos 500 dominios con su nivel de severidad. "
+        "La hoja 'IOC matches' lista cuáles de estos efectivamente APARECIERON en este caso."
     ),
     "ioc_hits": (
-        "Coincidencias entre los IOCs cargados y los artefactos del navegador. Cada fila indica "
-        "qué IOC coincidió con qué artefacto, en qué campo, y con qué valor. Estas son las pistas "
-        "más urgentes de revisar."
+        "Las coincidencias — donde los IOCs cargados se encontraron en los datos del caso. "
+        "Cada fila significa: 'El valor X (marcado como sospechoso) APARECE en este caso, en el "
+        "campo Y de la hoja Z'. "
+        "Ej: una fila puede decir: 'IOC malware.example.com → coincidió con campo url en la "
+        "hoja history'. "
+        "Son los datos más urgentes de revisar — son justamente lo que se buscaba detectar."
     ),
     "os_artifacts": (
-        "Artefactos del sistema operativo correlacionados con la actividad del navegador: "
-        "Registro de Windows (TypedURLs, TypedPaths), Prefetch (lanzamientos del ejecutable del "
-        "navegador), LNK recientes, hosts file estático y caché DNS. Confirman la actividad desde "
-        "una perspectiva FUERA del navegador."
+        "Información extraída del sistema operativo Windows (no del navegador), recolectada "
+        "para corroborar la actividad desde otra perspectiva. "
+        "Ej: si en el Registro de Windows hay una entrada de 'TypedURLs' que dice 'bbva.com', "
+        "Windows recuerda que esa URL fue escrita en el Explorador o en el campo 'Ejecutar' — "
+        "esto refuerza lo que dice el historial del navegador. "
+        "Incluye: Registro de Windows (URLs y rutas escritas), Prefetch (cuándo se ejecutó el "
+        "binario del navegador), accesos directos LNK recientes, archivo hosts y caché DNS."
     ),
     "source_files": (
-        "Cadena de custodia: cada archivo fuente que WebForensics tocó durante la extracción, "
-        "con su SHA-256, tamaño, mtime/atime/ctime y (si vino de una imagen forense) ruta de la "
-        "imagen y offset. Esta hoja es la prueba técnica de qué leyó la herramienta."
+        "Cadena de custodia: lista de TODOS los archivos que WebForensics leyó durante la "
+        "extracción, con la huella criptográfica de cada uno (SHA-256). "
+        "Ej: una fila puede decir 'C:\\Users\\juan\\AppData\\...\\History → SHA-256 7e2c3a8f...'. "
+        "El SHA-256 prueba que ese archivo no fue alterado: si dos archivos comparten SHA-256 "
+        "son idénticos byte por byte; si cambia un solo byte, el SHA-256 cambia por completo. "
+        "Esta hoja es la prueba técnica de QUÉ FUENTES alimentaron el resto del reporte."
     ),
     "domain_intel": (
-        "Enriquecimiento de dominios: información de WHOIS / GeoIP / TLD almacenada en caché para "
-        "los dominios encontrados. Marca dominios con riesgo elevado (TLDs sospechosos, .onion, "
-        "punycode) cuando se puede."
+        "Información extra de cada dominio web que apareció en el caso: quién lo registró, en "
+        "qué país, qué proveedor lo aloja, y un nivel de riesgo calculado por la app. "
+        "Ej: 'banco-falso-12345.tk → país=TK, registrar=desconocido, riesgo=alto' alerta sobre "
+        "un dominio en una extensión gratuita (.tk) usada frecuentemente por sitios de phishing. "
+        "Los datos vienen de un caché offline incluido en la app — no se consulta internet "
+        "durante el análisis."
     ),
     "tags": (
-        "Notas y etiquetas del analista: filas que el analista marcó manualmente como evidencia "
-        "o anotó con comentarios. Estas son las anotaciones de revisión humanas, no automáticas."
+        "Notas y etiquetas que un analista HUMANO escribió manualmente durante la revisión del "
+        "caso dentro de la app. "
+        "Ej: una fila puede decir 'history fila WF-00001234 → etiqueta: evidencia_clave, nota: "
+        "verificar este pago'. "
+        "A diferencia del resto de hojas (que son salidas automáticas), aquí están las "
+        "OBSERVACIONES HUMANAS — lo que un revisor marcó explícitamente."
     ),
 }
 
@@ -144,120 +181,183 @@ except Exception:  # noqa: BLE001
 # ---------------------------------------------------------------------------
 
 
-# One paragraph per artifact in Spanish.
+# Descripción de cada hoja en estilo "for dummies": una analogía
+# cotidiana al inicio + ejemplos concretos + una aclaración objetiva
+# de lo que el dato NO prueba por sí solo. Las definiciones usan voz
+# pasiva (sin afirmar quién hizo qué); los ejemplos van marcados con
+# "Ej:" y son hipotéticos.
 _ARTIFACT_INTERPRETATIONS: dict[str, str] = {
     "history": (
-        "Historial de navegación: cada URL que el usuario visitó con su navegador. "
-        "Incluye la fecha de la última visita y el número total de veces que abrió esa página. "
-        "Un 'visit_type' de 'typed' significa que la URL fue escrita a mano (intención clara), "
-        "mientras que 'link' significa que llegó haciendo clic en otra página. "
-        "Filas marcadas con visit_type='carved' fueron recuperadas de espacio borrado del navegador."
+        "Es como la 'libreta de páginas visitadas' del navegador. Por cada dirección web (URL) "
+        "abierta en este perfil queda una fila con: la dirección, el título de la página, "
+        "cuántas veces se abrió y cuándo fue la última vez. "
+        "Ej: si se entró 12 veces a 'facebook.com', aparece una sola fila para esa URL con "
+        "Visitas registradas = 12 y la fecha del último acceso. "
+        "La columna 'Tipo de visita' dice CÓMO se llegó cada vez (escribiendo la URL, click en "
+        "un enlace, desde un favorito, etc.) — ver la leyenda al pie de este banner. "
+        "Las filas marcadas como 'Fila recuperada de espacio borrado' son las que alguien intentó "
+        "eliminar pero la app pudo rescatar de huecos internos del archivo del historial."
     ),
     "cookies": (
-        "Cookies: pequeños archivos que los sitios web dejan en el navegador para recordar "
-        "sesiones, preferencias y rastrear actividad. Una cookie con host 'accounts.google.com' "
-        "indica que el usuario interactuó con Google. La columna 'secure' indica si solo viaja por HTTPS; "
-        "'http_only' es una protección anti-robo de cookie. Una sesión activa generalmente significa "
-        "una visita reciente."
+        "Cookies: archivos chiquitos que los sitios web dejan dentro del navegador para "
+        "reconocerlo en visitas posteriores. Es lo que hace que cuando se entra a Facebook un "
+        "día y al siguiente ya se está dentro sin volver a poner usuario y contraseña. "
+        "Cada fila aquí es una cookie: el sitio que la dejó (columna 'Dominio'), su nombre, "
+        "cuándo se creó y cuándo expira. "
+        "Ej: una cookie con dominio '.google.com' y nombre 'SID' es típica de una sesión "
+        "iniciada en Google. "
+        "Una cookie por sí sola NO prueba que se haya hecho login en ese sitio: muchos sitios "
+        "dejan cookies con solo cargarlos para fines publicitarios o de medición."
     ),
     "downloads": (
-        "Descargas: archivos que el usuario bajó de internet. Muestra la URL de origen, dónde se "
-        "guardó el archivo en disco ('target_path'), el tamaño y el estado (complete = descarga "
-        "exitosa). Si el archivo sigue en el disco en esa ruta, es evidencia directa del download. "
-        "Si NO está, el usuario lo borró pero el navegador todavía recuerda que existió."
+        "Lista de los archivos que el navegador descargó. Es lo mismo que aparece en "
+        "chrome://downloads. Cada fila tiene: de qué URL vino, dónde se guardó en el disco "
+        "(ej: 'C:\\Users\\juan\\Downloads\\contrato.pdf'), tamaño en MB y si terminó completa o "
+        "se interrumpió. "
+        "Que un archivo aparezca aquí significa que el navegador inició la descarga; si todavía "
+        "EXISTE en el disco en esa ruta hay que verificarlo aparte revisando esa carpeta. "
+        "Si NO está, no se puede saber desde este registro si fue movido, borrado o nunca llegó "
+        "a guardarse — solo que el navegador lo intentó."
     ),
     "logins": (
-        "Credenciales guardadas: usuarios y contraseñas que el navegador almacenó. "
-        "Si 'encrypted'=True significa que el password no se pudo descifrar (típico en imágenes "
-        "forenses sin acceso a la clave DPAPI del usuario). Aunque no se vea el password, saber "
-        "QUÉ sitios tienen credenciales guardadas es altamente informativo: muestra qué cuentas "
-        "usaba el usuario."
+        "La libreta de 'usuario y contraseña recordados' del navegador — lo mismo que aparece en "
+        "chrome://settings/passwords. Por cada combinación sitio + usuario guardada hay una fila. "
+        "Ej: una fila con sitio 'https://github.com' y usuario 'manuel' significa que en algún "
+        "momento se guardó esa credencial para autocompletar al volver a entrar a GitHub. "
+        "Si la columna 'Cifrado (no descifrable)' dice 'Sí', el password está protegido por "
+        "Windows y la app no pudo leerlo — pero SABER en qué sitios había contraseñas guardadas "
+        "ya es información útil (revela el catálogo de cuentas que pasaron por este navegador). "
+        "La sola presencia de una credencial no implica que esa cuenta sea de la persona dueña "
+        "del equipo — el navegador guarda lo que se le diga."
     ),
     "bookmarks": (
-        "Favoritos / Marcadores: sitios que el usuario guardó intencionalmente. "
-        "Más significativos forensemente que el historial — son páginas que el usuario decidió "
-        "conservar. Las fechas date_added muestran cuándo se guardó cada favorito."
+        "Los favoritos del navegador — las páginas que SÍ se guardaron a propósito haciendo "
+        "'Agregar a favoritos' o ⭐. A diferencia del Historial (que se llena solo), aquí solo "
+        "aparecen URLs que alguien guardó deliberadamente. "
+        "Ej: una fila con nombre 'BBVA Banca' y URL 'https://www.bbva.com.ec/' en la carpeta "
+        "'Bancos' indica que esa URL fue marcada como favorita. "
+        "La columna 'Fecha en que se guardó el favorito' suele ser un dato más confiable que el "
+        "historial: alguien tuvo que abrir el menú y guardar el favorito explícitamente."
     ),
     "autofill": (
-        "Datos de autocompletado: lo que el usuario escribió en formularios web (nombre, dirección, "
-        "número de teléfono, números de tarjeta, búsquedas, etc.) y que el navegador guardó para "
-        "rellenar automáticamente en el futuro. 'count' es cuántas veces se usó ese valor."
+        "Datos que el navegador 'aprendió' de los formularios web — lo que va llenando solo "
+        "cuando uno empieza a escribir en un campo. "
+        "Ej: si en algún momento se escribió 'manuel@ejemplo.com' en un campo de correo y se "
+        "aceptó guardarlo, aparece una fila con campo='email', valor='manuel@ejemplo.com'. "
+        "Cosas típicas que se guardan: correos, nombres, números de teléfono, direcciones "
+        "postales, búsquedas previas en sitios. "
+        "NO se guardan contraseñas aquí — esas viven en la hoja Logins."
     ),
     "extensions": (
-        "Extensiones instaladas: complementos del navegador. Algunas son inocuas (bloqueadores de "
-        "anuncios, traductores), otras son indicadores forenses fuertes — extensiones de VPN, de "
-        "borrado de historial, de cripto-wallet, de descarga de video, de proxy. "
-        "El extension_id permite buscarla en la Chrome Web Store o AMO."
+        "Extensiones instaladas en el navegador — los 'add-ons' que se ven en chrome://extensions "
+        "o about:addons en Firefox. Pueden ser inocuas (bloqueador de anuncios, traductor, "
+        "lector PDF) o relevantes para revisar (VPN, proxy, billetera de criptomonedas, "
+        "descargador de video, herramientas para limpiar historial). "
+        "El 'ID de la extensión' es un código único — copiándolo en chrome.google.com/webstore "
+        "o addons.mozilla.org se ve exactamente cuál extensión es. "
+        "Ej: el ID 'cjpalhdlnbpafiamejdnhcphjbkeiagm' corresponde a uBlock Origin."
     ),
     "cache_entries": (
-        "Caché HTTP: URLs de recursos (imágenes, scripts, páginas) que el navegador descargó y "
-        "guardó localmente para evitar volver a pedirlos. Es un rastro INDIRECTO — aparece aquí "
-        "incluso si la URL no está en el historial. Forensemente útil para reconstruir qué páginas "
-        "vio el usuario más allá del historial visible."
+        "Caché del navegador: copias locales de cosas que el navegador descargó alguna vez "
+        "(imágenes, scripts, partes de páginas) para no tener que volver a pedirlas en cada "
+        "visita. Es lo que hace que las páginas que se visitan mucho carguen más rápido. "
+        "Para análisis es un rastro INDIRECTO: si una URL aparece aquí significa que el "
+        "navegador la abrió al menos una vez — aunque solo haya sido para cargar una imagen "
+        "embebida — INCLUSO si esa URL no figura en el historial visible. "
+        "Ej: si en el caché aparece 'twitter.com/...' pero en el historial no hay nada de "
+        "Twitter, alguien pudo haber abierto la pestaña, mirado y cerrado sin que quede "
+        "registrado en el historial."
     ),
     "web_storage": (
-        "LocalStorage / IndexedDB: bases de datos que los sitios web usan para guardar datos "
-        "persistentes en el navegador (tokens de autenticación, configuración de la web, mensajes "
-        "de chat, drafts). Es una mina de oro forense — apps como WhatsApp Web, Discord o Telegram "
-        "almacenan los mensajes aquí."
+        "Espacios donde los sitios web guardan datos dentro del navegador. Aquí es donde las "
+        "aplicaciones web modernas (WhatsApp Web, Discord, Telegram Web, Slack, Microsoft Teams) "
+        "guardan los MENSAJES de chat para que aparezcan al volver a entrar al sitio sin tener "
+        "que descargarlos otra vez. "
+        "Ej: una fila con dominio 'https://web.whatsapp.com' y tipo 'IndexedDB' suele contener "
+        "mensajes y contactos de WhatsApp Web. "
+        "Cada fila: qué sitio, en qué tipo de almacén, qué guardó (clave + valor)."
     ),
     "open_tabs": (
-        "Pestañas abiertas: las páginas que el navegador tenía abiertas la última vez que se cerró. "
-        "Refleja lo que el usuario estaba mirando justo antes de apagar/cerrar. Si la columna "
-        "session = 'last' es la sesión anterior; 'current' es la actual."
+        "Las pestañas que estaban abiertas en el navegador la última vez. "
+        "Sesión activa = lo que estaba abierto JUSTO ahora; Sesión anterior = lo que estaba "
+        "abierto antes de la última vez que se cerró el navegador. "
+        "Ej: si la sesión activa tiene 5 pestañas abiertas en bancos y otra en correo, indica "
+        "qué se estaba mirando al momento del análisis. "
+        "Útil para reconstruir qué páginas se estaban consultando justo antes de cerrar o "
+        "apagar el equipo."
     ),
     "permissions": (
-        "Permisos otorgados: a qué sitios el usuario les dio acceso a cámara, micrófono, "
-        "ubicación, notificaciones, etc. Si aparece 'allow' en 'camera' o 'microphone' para un "
-        "sitio sospechoso, es un hallazgo notable."
+        "Permisos que se les dieron a los sitios web — la misma lista que aparece en "
+        "chrome://settings/content. Por cada decisión (permitir o bloquear) hay una fila. "
+        "Ej: 'meet.google.com → camera → Permitido' significa que a Google Meet se le dio "
+        "acceso a la cámara web. 'facebook.com → notifications → Bloqueado' significa que se "
+        "bloqueó que Facebook mande notificaciones de escritorio. "
+        "Esta hoja muestra QUÉ se autorizó, no si efectivamente se usó."
     ),
 }
 
 
-# Legend printed in the History sheet banner so the analyst doesn't have
-# to memorise Chromium/Firefox visit_type codes. Pulled from the
-# ``_VISIT_TYPES`` dicts in ``browsers/chromium.py`` and ``browsers/firefox.py``.
+# Leyenda objetiva del campo visit_type. Cada descripción documenta el
+# mecanismo que generó la entrada según la base de datos del navegador,
+# sin atribuir intencionalidad al usuario (el campo no diferencia entre
+# acción humana directa, scripts, redirecciones automáticas o pruebas).
+#
+# Solo incluimos aquí los códigos comunes a Chromium + Firefox que un
+# revisor encuentra habitualmente. Los específicos de un navegador en
+# particular (bookmark, embed, framed_link) o los muy poco frecuentes
+# (manual_subframe, auto_toplevel, keyword, keyword_generated) quedan
+# sin leyenda; siguen apareciendo en la columna 'visit_type' tal cual
+# si llegan a presentarse.
 _VISIT_TYPE_LEGEND: dict[str, str] = {
-    "typed": "el usuario escribió la URL a mano en la barra de direcciones (intención clara)",
-    "link": "el usuario hizo clic en un enlace desde otra página",
-    "auto_bookmark": "navegó desde un favorito guardado",
-    "bookmark": "navegó desde un favorito (Firefox)",
-    "auto_subframe": "iframe/subframe cargado automáticamente (no es navegación del usuario)",
-    "manual_subframe": "iframe/subframe que el usuario activó",
-    "generated": "URL generada por el autocompletado de la barra de direcciones",
-    "auto_toplevel": "navegación automática a nivel de pestaña (rara, suele ser redirección)",
-    "form_submit": "envío de formulario (login, búsqueda, etc.)",
-    "reload": "recarga de la página (F5, Ctrl+R)",
-    "keyword": "búsqueda hecha escribiendo una palabra clave del navegador",
-    "keyword_generated": "URL generada por una búsqueda con palabra clave",
-    "embed": "recurso embebido (Firefox)",
-    "redirect_permanent": "redirección HTTP 301",
-    "redirect_temporary": "redirección HTTP 302/303/307",
-    "download": "la URL terminó en una descarga",
-    "framed_link": "clic en un enlace dentro de un iframe (Firefox)",
-    "carved": "fila recuperada de espacio borrado (no estaba viva en la base de datos)",
-}
-
-
-_CATEGORY_LABELS_ES = {
-    "banking": "Banca / finanzas",
-    "social": "Redes sociales",
-    "im": "Mensajería",
-    "mail": "Correo electrónico",
-    "streaming": "Streaming / video",
-    "shopping": "Compras",
-    "search": "Buscadores",
-    "news": "Noticias",
-    "dev": "Desarrollo / código",
-    "government": "Gobierno",
-    "education": "Educación",
-    "darkweb": "Dark web",
-    "vpn_proxy": "VPN / proxy",
-    "crypto": "Criptomonedas",
-    "adult": "Adulto",
-    "gambling": "Apuestas",
-    "cloud": "Nube / almacenamiento",
-    "advertising": "Publicidad",
+    "typed":
+        "La URL se ingresó directamente en la barra de direcciones del navegador (la barra de "
+        "arriba, donde dice https://). Aplica tanto si se escribió letra por letra como si se "
+        "pegó con copy/paste. Ej: alguien escribió 'banco.com' arriba y dio Enter.",
+    "link":
+        "Se llegó haciendo click en un enlace que estaba en OTRA página. Ej: estando en Google "
+        "leyendo resultados de búsqueda, se hizo click en uno de los enlaces de la lista — la "
+        "página de destino aparece marcada así.",
+    "auto_bookmark":
+        "Se llegó abriendo un favorito guardado del navegador (la estrellita ⭐). "
+        "Ej: si Facebook está en favoritos y se le da click ahí, la entrada queda marcada así.",
+    "auto_subframe":
+        "La URL se cargó SOLA dentro de un recuadrito pequeño embebido en otra página — sin "
+        "acción del usuario. Ej: un anuncio que aparece en un blog, un widget de Twitter "
+        "embebido en una noticia, un contador de visitas oculto. La URL del recuadrito embebido "
+        "se registra aunque nadie haya interactuado con ella.",
+    "generated":
+        "La URL fue armada por el AUTOCOMPLETADO del navegador. Ej: si se empieza a escribir "
+        "'fac' en la barra y aparece la sugerencia 'facebook.com/manuel' que se acepta dando "
+        "Enter, la URL final que se abrió queda como 'generated' (no como 'typed', porque no se "
+        "escribió completa).",
+    "form_submit":
+        "La URL es la página a la que se llegó DESPUÉS de enviar un formulario. Ej: en un login, "
+        "tras poner usuario+contraseña y darle 'Iniciar sesión', la página de bienvenida que "
+        "carga el navegador queda marcada así. También aplica para envíos de búsqueda, "
+        "registros, contactos, etc.",
+    "reload":
+        "Recarga de la misma página — apretar F5, Ctrl+R, el botón de recargar del navegador, "
+        "o que un script de la propia página la recargue automáticamente.",
+    "redirect_permanent":
+        "Redirección automática que el servidor del sitio ordenó con código HTTP 301 ('movida "
+        "para siempre'). Ej: el sitio se mudó de dominio (de 'oldname.com' a 'newname.com'); "
+        "cualquiera que entre al viejo es enviado automáticamente al nuevo.",
+    "redirect_temporary":
+        "Redirección automática del servidor con código HTTP 302/303/307 ('movida por ahora'). "
+        "Muy común en flujos de login: tras autenticarse el servidor 'rebota' al navegador a la "
+        "página principal del sitio. También aparece con URLs cortas tipo 'bit.ly/abc123' que "
+        "redirigen al destino final.",
+    "download":
+        "La URL terminó disparando una descarga de archivo (PDF, ZIP, instalador, video, etc.). "
+        "El detalle completo del archivo descargado aparece en la hoja 'Downloads'.",
+    "carved":
+        "Esta fila NO estaba viva en la base de datos del navegador en el momento de la "
+        "extracción. La app la rescató de espacio no asignado dentro del archivo del historial. "
+        "Ej: si alguien borra el historial desde el menú del navegador, las URLs no desaparecen "
+        "del archivo de inmediato — quedan en huecos internos hasta que algo nuevo las "
+        "sobreescriba. Las filas marcadas 'carved' son exactamente esos restos rescatados. "
+        "No se puede determinar QUIÉN ni CUÁNDO las borró — solo que en algún momento se "
+        "marcaron como eliminadas y la app las pudo recuperar.",
 }
 
 
@@ -268,7 +368,7 @@ _FIELD_HINTS: dict[str, dict[str, str]] = {
         "url": "URL completa de la página",
         "title": "Título mostrado en la pestaña",
         "visit_count": "Número total de visitas registradas",
-        "typed_count": "Veces que la URL fue escrita a mano (intención clara)",
+        "typed_count": "Contador que lleva el navegador de visitas con visit_type='typed'",
         "last_visit": "Fecha y hora de la última visita (UTC-5)",
         "visit_type": "Cómo se llegó a la página: typed=escrita, link=clic, bookmark=desde favorito, carved=recuperada de borrado",
         "deleted": "True si la entrada fue recuperada de espacio borrado",
@@ -303,21 +403,21 @@ _FIELD_HINTS: dict[str, dict[str, str]] = {
         "action_url": "URL del formulario de login",
         "username": "Usuario guardado",
         "password": "Contraseña descifrada (vacío si encrypted=True)",
-        "date_created": "Primera vez que el usuario guardó esta credencial",
+        "date_created": "Marca temporal del primer registro de esta credencial en el navegador",
         "date_last_used": "Última vez que se usó el autocompletado",
         "times_used": "Número de veces que se rellenó automáticamente",
         "encrypted": "True si el password no pudo descifrarse",
     },
     "bookmarks": {
         "folder": "Carpeta dentro de los favoritos",
-        "name": "Nombre que el usuario le puso al favorito",
+        "name": "Nombre del favorito tal como aparece registrado",
         "url": "URL guardada",
         "date_added": "Cuándo lo guardó",
         "date_modified": "Última edición del favorito",
     },
     "autofill": {
         "field_name": "Nombre del campo del formulario (email, telefono, address…)",
-        "value": "Valor que el usuario escribió",
+        "value": "Valor capturado por el navegador durante el llenado del formulario",
         "count": "Veces que ese valor se usó",
         "first_used": "Primera vez que lo escribió",
         "last_used": "Última vez que lo reutilizó",
@@ -368,15 +468,6 @@ _FIELD_HINTS: dict[str, dict[str, str]] = {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _host(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        return urlparse(url).netloc or url
-    except Exception:  # noqa: BLE001
-        return url
 
 
 # openpyxl mirrors Excel's own restriction: cells must not carry control
@@ -597,42 +688,16 @@ class XlsxExporter(ExporterBase):
         ws["A3"] = (
             "Reporte de extracción y análisis de perfiles de navegador. "
             "Cada hoja contiene un tipo de artefacto independiente. "
-            "El glosario al final de esta hoja documenta el significado de cada uno. "
+            "La leyenda al final de esta hoja documenta el significado de cada uno. "
             f"Todas las fechas y horas están en hora local {REPORT_TZ_LABEL}."
         )
         ws["A3"].font = body_font
         ws["A3"].alignment = wrap
         ws.merge_cells("A3:F4")
 
-        # Profile summary block
-        ws["A6"] = "Perfiles analizados"
-        ws["A6"].font = section_font
-        ws["A7"] = "Navegador"
-        ws["B7"] = "Perfil"
-        ws["C7"] = "Total elementos"
-        for col, kind in enumerate(kinds, start=4):
-            ws.cell(row=7, column=col, value=kind)
-            ws.cell(row=7, column=col).font = section_font
-        ws["A7"].font = section_font
-        ws["B7"].font = section_font
-        ws["C7"].font = section_font
-
-        row = 8
-        for bundle in bundles:
-            ws.cell(row=row, column=1, value=bundle.browser)
-            ws.cell(row=row, column=2, value=bundle.profile)
-            total = sum(len(bundle.get(k)) for k in kinds)
-            ws.cell(row=row, column=3, value=total)
-            for col, kind in enumerate(kinds, start=4):
-                ws.cell(row=row, column=col, value=len(bundle.get(kind)))
-            row += 1
-        if not bundles:
-            ws.cell(row=row, column=1, value="(sin perfiles)")
-            row += 1
-
-        # Glosario de artefactos
-        row += 2
-        ws.cell(row=row, column=1, value="Glosario de artefactos")
+        # Leyenda de artefactos
+        row = 6
+        ws.cell(row=row, column=1, value="Leyenda de artefactos")
         ws.cell(row=row, column=1).font = section_font
         row += 1
         for kind in kinds:
@@ -653,16 +718,6 @@ class XlsxExporter(ExporterBase):
                 ws.cell(row=row, column=2, value=es).alignment = wrap
                 ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
                 row += 2
-
-        # Estadísticas y hallazgos automáticos
-        row += 1
-        ws.cell(row=row, column=1, value="Hallazgos").font = section_font
-        row += 1
-        for line in self._highlights(bundles, extras, store):
-            ws.cell(row=row, column=1, value="•")
-            ws.cell(row=row, column=2, value=line).alignment = wrap
-            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
-            row += 1
 
         # Column widths
         widths = (16, 28, 14, 14, 14, 14)
@@ -852,170 +907,6 @@ class XlsxExporter(ExporterBase):
             ws.cell(row=idx, column=3, value=_truncate(err))
         self._finalize(ws, headers, 3 + len(errors), header_row=3)
 
-    # --- Findings -----------------------------------------------------
-
-    def _highlights(
-        self,
-        bundles: list[ProfileBundle],
-        extras: list[str] = (),
-        store=None,
-    ) -> list[str]:
-        """Generate plain-language bullet points about the dataset."""
-        out: list[str] = []
-        if not bundles:
-            return ["No se analizaron perfiles."]
-
-        total_hist = sum(len(b.history) for b in bundles)
-        total_cookies = sum(len(b.cookies) for b in bundles)
-        total_logins = sum(len(b.logins) for b in bundles)
-        total_dl = sum(len(b.downloads) for b in bundles)
-        total_ext = sum(len(b.extensions) for b in bundles)
-
-        out.append(
-            f"Se procesaron {len(bundles)} perfil(es): "
-            f"{total_hist:,} entradas de historial, {total_cookies:,} cookies, "
-            f"{total_logins:,} credenciales guardadas, {total_dl:,} descargas, "
-            f"{total_ext:,} extensiones."
-        )
-
-        # Top hosts in history.
-        host_counter: Counter[str] = Counter()
-        for b in bundles:
-            for h in b.history:
-                host = _host(h.url)
-                if host:
-                    host_counter[host] += int(h.visit_count) or 1
-        if host_counter:
-            top = host_counter.most_common(5)
-            top_text = ", ".join(f"{h} ({c:,})" for h, c in top)
-            out.append(f"Hosts más visitados (por visit_count): {top_text}.")
-
-        # Category counts.
-        cat_counter: Counter[str] = Counter()
-        for b in bundles:
-            for h in b.history:
-                if h.category:
-                    cat_counter[h.category] += 1
-        if cat_counter:
-            cat_pairs = [(c, n) for c, n in cat_counter.most_common() if c]
-            label = ", ".join(
-                f"{_CATEGORY_LABELS_ES.get(c, c)} = {n}" for c, n in cat_pairs[:8]
-            )
-            out.append(f"Categorías de navegación detectadas: {label}.")
-
-        # Notable categories: highlight dark web / vpn / banking / crypto.
-        notable = {"darkweb", "vpn_proxy", "crypto", "gambling", "adult"}
-        for cat in notable:
-            n = cat_counter.get(cat, 0)
-            if n:
-                out.append(
-                    f"⚠ Se detectaron {n} entrada(s) en la categoría '{_CATEGORY_LABELS_ES.get(cat, cat)}'. "
-                    f"Revisa la hoja 'History' filtrando por category = '{cat}'."
-                )
-
-        # Saved credentials inventory.
-        cred_sites = {l.origin_url for b in bundles for l in b.logins if l.origin_url}
-        if cred_sites:
-            sample = ", ".join(sorted(cred_sites)[:10])
-            extra = "" if len(cred_sites) <= 10 else f" (y {len(cred_sites)-10} más)"
-            out.append(
-                f"Hay credenciales guardadas para {len(cred_sites)} sitio(s): {sample}{extra}. "
-                f"Revisa la hoja 'Logins' para detalle."
-            )
-
-        # Encrypted logins/cookies.
-        n_enc_logins = sum(1 for b in bundles for l in b.logins if l.encrypted)
-        n_enc_cookies = sum(1 for b in bundles for c in b.cookies if c.encrypted)
-        if n_enc_logins or n_enc_cookies:
-            out.append(
-                f"No se pudieron descifrar {n_enc_logins} contraseña(s) ni {n_enc_cookies} cookie(s). "
-                f"Esto es esperable en imágenes forenses cuando no se tiene la clave DPAPI del usuario."
-            )
-
-        # Carved (deleted) content.
-        n_carved = sum(1 for b in bundles for h in b.history if h.deleted)
-        if n_carved:
-            out.append(
-                f"Se recuperaron {n_carved} entrada(s) de historial BORRADO por el usuario "
-                f"(visit_type = 'carved' en la hoja 'History')."
-            )
-
-        # Risky extensions heuristic.
-        risky_keywords = ("vpn", "proxy", "tor", "wallet", "crypto", "anonym", "history clean", "incognito")
-        risky_ext = [
-            f"{b.browser}/{e.name}"
-            for b in bundles for e in b.extensions
-            if any(k in (e.name or "").lower() or k in (e.description or "").lower() for k in risky_keywords)
-        ]
-        if risky_ext:
-            out.append(
-                "Extensiones potencialmente relevantes (VPN/proxy/crypto/anti-forenses): "
-                + ", ".join(risky_ext[:8])
-                + ("…" if len(risky_ext) > 8 else "")
-            )
-
-        # Downloads — list executables and archives.
-        risky_dl = [
-            d for b in bundles for d in b.downloads
-            if (d.target_path or "").lower().endswith((".exe", ".msi", ".bat", ".ps1", ".zip", ".rar", ".7z"))
-        ]
-        if risky_dl:
-            out.append(
-                f"Se descargaron {len(risky_dl)} archivo(s) ejecutable o comprimido(s). "
-                f"Revisa la hoja 'Downloads' filtrando por extensión .exe, .msi, .zip, etc."
-            )
-
-        # Highlights from extra tables when we have a store.
-        if store is not None and extras:
-            try:
-                for table in extras:
-                    count = self._count_table(store, table)
-                    if count:
-                        out.append(
-                            f"{EXTRA_TABLE_HUMAN_NAMES.get(table, table)}: {count:,} fila(s). "
-                            f"Detalle en la hoja correspondiente."
-                        )
-            except Exception:  # noqa: BLE001
-                pass
-            # Specific spotlights worth calling out.
-            try:
-                ioc_hits_count = self._count_table(store, "ioc_hits")
-                if "ioc_hits" in extras and ioc_hits_count:
-                    out.append(
-                        f"⚠ Se registraron {ioc_hits_count:,} coincidencia(s) de IOC. "
-                        f"Revisa primero la hoja 'IOC matches'."
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                critical_findings = self._count_findings_by_severity(store, ("critical", "high"))
-                if "findings" in extras and critical_findings:
-                    out.append(
-                        f"⚠ Hallazgos forenses críticos / altos: {critical_findings}. "
-                        f"Revisa la hoja 'Findings' filtrando por severity = critical o high."
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-
-        return out
-
-    def _count_table(self, store, table: str) -> int:
-        try:
-            row = store.connection().execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
-            return int(row["n"] or 0)
-        except Exception:  # noqa: BLE001
-            return 0
-
-    def _count_findings_by_severity(self, store, severities) -> int:
-        placeholders = ",".join("?" for _ in severities)
-        try:
-            row = store.connection().execute(
-                f"SELECT COUNT(*) AS n FROM findings WHERE severity IN ({placeholders})",
-                tuple(severities),
-            ).fetchone()
-            return int(row["n"] or 0)
-        except Exception:  # noqa: BLE001
-            return 0
 
     # --- Styling helpers ---------------------------------------------
 

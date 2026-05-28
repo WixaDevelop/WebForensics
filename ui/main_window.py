@@ -529,30 +529,32 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("Open failed"), str(exc))
             return
         if probe.bitlocker_partitions:
-            if probe.libbde_incompatible:
-                # libbde can't parse this volume — offer the auto-mount
-                # path (mount with Arsenal/OSFMount + unlock via Windows
-                # BitLocker, all orchestrated from inside the app).
-                handled = self._try_auto_mount_bitlocker(image_path, probe)
-                if handled:
-                    # _try_auto_mount_bitlocker took over the flow
-                    # (kicked off folder auto-detect on the unlocked drive).
-                    return
-                # User declined / auto-mount failed and they chose to continue
-                # without it — proceed with the partial scan.
-            else:
-                dialog = BitLockerCredentialsDialog(probe.bitlocker_partitions, self)
-                if dialog.exec_() != BitLockerCredentialsDialog.Accepted:
-                    return
-                bitlocker_credentials = dialog.credentials
-                self._audit.record(
-                    "bitlocker_prompt",
-                    target=str(image_path),
-                    partitions=[p.addr for p in probe.bitlocker_partitions],
-                    supplied=bool(bitlocker_credentials),
-                )
+            # Always ask for credentials first — even when libbde says the
+            # format is incompatible. Reasons:
+            #   (1) Our native parser may unlock formats libbde can't.
+            #   (2) Even if both backends fail, having the analyst's key in
+            #       hand makes the post-fail fallback (auto-mount + Windows
+            #       BitLocker) a single extra click.
+            dialog = BitLockerCredentialsDialog(
+                probe.bitlocker_partitions, self,
+                libbde_compatible=not probe.libbde_incompatible,
+            )
+            if dialog.exec_() != BitLockerCredentialsDialog.Accepted:
+                return
+            bitlocker_credentials = dialog.credentials
+            self._audit.record(
+                "bitlocker_prompt",
+                target=str(image_path),
+                partitions=[p.addr for p in probe.bitlocker_partitions],
+                supplied=bool(bitlocker_credentials),
+                libbde_compatible=not probe.libbde_incompatible,
+            )
 
         self._audit.record("open_image", target=str(image_path), sha256=digest)
+        # Stash the path + creds so the post-extraction fallback (auto-mount
+        # with Windows BitLocker) can re-launch against the same image.
+        self._current_image_path = image_path
+        self._current_image_creds = bitlocker_credentials
         self._progress.show()
         self._summary_label.setText(f"Reading image {image_path.name}…")
         self._tree.setEnabled(False)
@@ -812,19 +814,103 @@ class MainWindow(QMainWindow):
         self._image_diagnostic = diagnostic
 
     def _on_image_extraction_done(self) -> None:
-        """Image-specific completion: if nothing was found, show diagnostics."""
+        """Image-specific completion. Routes to one of three outcomes:
+
+        * Profiles were staged → show normal Ready state.
+        * Nothing staged AND BitLocker partitions remained locked → offer
+          the auto-mount + Windows BitLocker workflow as fallback.
+        * Nothing staged for other reasons → show the diagnostic dialog.
+        """
         diag = self._image_diagnostic
         had_results = bool(diag and getattr(diag, "profiles_staged", 0))
+        # Did the locator see BitLocker partitions it couldn't unlock?
+        unlocked_failed = bool(
+            diag
+            and getattr(diag, "bitlocker_partitions", None)
+            and len(getattr(diag, "bitlocker_unlocked", []))
+                < len(getattr(diag, "bitlocker_partitions", []))
+        )
         self._on_extraction_done()
-        if diag is not None and not had_results:
-            QMessageBox.warning(
-                self,
-                tr("No profiles found in image"),
-                tr(
-                    "No browser profiles could be staged from this image.\n\n"
-                    "Diagnostic details:\n\n{details}"
-                ).format(details=diag.to_text()),
+        if had_results or diag is None:
+            return
+        if unlocked_failed:
+            self._offer_bitlocker_mount_fallback(diag)
+            return
+        QMessageBox.warning(
+            self,
+            tr("No profiles found in image"),
+            tr(
+                "No browser profiles could be staged from this image.\n\n"
+                "Diagnostic details:\n\n{details}"
+            ).format(details=diag.to_text()),
+        )
+
+    def _offer_bitlocker_mount_fallback(self, diag) -> None:
+        """Show a clear next-step dialog when the in-app unlock failed."""
+        from forensics.auto_mount import find_mounter, is_admin
+        admin = is_admin()
+        mounter = find_mounter()
+        size_gb = sum(p.byte_length for p in diag.bitlocker_partitions) / (1024 ** 3)
+        last_error = diag.bitlocker_failed[-1] if diag.bitlocker_failed else ""
+
+        if admin and mounter is not None:
+            txt = tr(
+                "El desbloqueo de BitLocker falló desde dentro de la app "
+                "({size:.1f} GiB cifrados). El formato es muy reciente y los "
+                "backends incluidos (libbde + parser nativo) no lo soportan.\n\n"
+                "WebForensics puede ahora montar la imagen con {mounter} y "
+                "usar el desbloqueador nativo de Windows con la misma clave "
+                "que acabas de ingresar. ¿Continuar con ese flujo?"
+            ).format(size=size_gb, mounter=mounter.name)
+            reply = QMessageBox.question(
+                self, tr("Probar desbloqueo automático con Windows"),
+                txt, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             )
+            if reply == QMessageBox.Yes:
+                # Re-use the existing auto-mount path with a probe stub
+                # made from the locator's already-discovered partitions.
+                from types import SimpleNamespace
+                stub = SimpleNamespace(
+                    bitlocker_partitions=diag.bitlocker_partitions,
+                    libbde_incompatible=True,
+                    libbde_error=last_error,
+                )
+                img_path = getattr(self, "_current_image_path", None)
+                if img_path is not None:
+                    self._try_auto_mount_bitlocker(img_path, stub)
+                return
+        elif not admin:
+            QMessageBox.warning(
+                self, tr("Desbloqueo BitLocker falló"),
+                tr(
+                    "El desbloqueo desde la app falló y no se puede usar el "
+                    "flujo de montaje automático porque WebForensics no se "
+                    "está ejecutando como Administrador.\n\n"
+                    "Cierra la app y vuelve a abrirla con clic derecho → "
+                    "'Ejecutar como administrador', después reintenta.\n\n"
+                    "Error técnico: {err}"
+                ).format(err=last_error[:300]),
+            )
+            return
+        else:
+            QMessageBox.warning(
+                self, tr("Desbloqueo BitLocker falló"),
+                tr(
+                    "El desbloqueo desde la app falló. Para usar el flujo de "
+                    "montaje automático necesitas instalar Arsenal Image "
+                    "Mounter (gratis, ~10 MB) desde arsenalrecon.com/downloads.\n\n"
+                    "Error técnico: {err}"
+                ).format(err=last_error[:300]),
+            )
+            return
+        # User declined the fallback — show the full diagnostic.
+        QMessageBox.warning(
+            self, tr("No profiles found in image"),
+            tr(
+                "No browser profiles could be staged from this image.\n\n"
+                "Diagnostic details:\n\n{details}"
+            ).format(details=diag.to_text()),
+        )
 
     def _on_extraction_failed(self, message: str) -> None:
         QMessageBox.critical(self, "Extraction failed", message)
@@ -832,28 +918,129 @@ class MainWindow(QMainWindow):
     # --- Tree -------------------------------------------------------------
 
     def _refresh_tree(self) -> None:
-        # Re-build from the store so the tree always matches reality.
+        """Rebuild the left tree from the store.
+
+        Profile names from image-staged extractions carry the Windows user
+        as a prefix (``<user>/<profile_name>`` — see
+        ``ForensicsController.extract_image``). VSS-snapshot-derived
+        profiles tack on ``@shadow-...`` suffixes. We parse both so the
+        tree shows a clean 3-level layout when there are multiple Windows
+        users in the case (Usuario → Navegador → Perfil), or the legacy
+        2-level layout when everything came from the same user (or from a
+        live extraction without user info).
+        """
         self._tree.clear()
         rows = self._session.store.list_profiles()
-        groups: dict[str, QTreeWidgetItem] = {}
+
+        # First pass: parse every row into (user, browser, profile_part, snapshot_label).
+        parsed: list[dict] = []
         for row in rows:
+            full_name = row["name"] or ""
             browser = row["browser"]
-            group = groups.get(browser)
+            if "/" in full_name:
+                user, profile_part = full_name.split("/", 1)
+            else:
+                user = ""
+                profile_part = full_name
+            snapshot_label = ""
+            if "@shadow-" in profile_part:
+                profile_part, snapshot_label = profile_part.split("@shadow-", 1)
+            try:
+                count = sum(eval(row["summary"]).values()) if row["summary"] else 0  # safe: our JSON
+            except Exception:  # noqa: BLE001
+                count = 0
+            parsed.append({
+                "id": int(row["id"]),
+                "user": user,
+                "browser": browser,
+                "profile_part": profile_part,
+                "snapshot": snapshot_label,
+                "count": count,
+                "path": row["path"] or "",
+            })
+
+        distinct_users = {p["user"] for p in parsed}
+        # Show the user level when the data spans more than one Windows
+        # account, OR when there's a single non-empty user (image case
+        # with one user) — but skip it for plain live extractions
+        # (everything has empty user).
+        show_user_level = bool(distinct_users - {""})
+
+        if show_user_level:
+            self._build_three_level_tree(parsed)
+        else:
+            self._build_two_level_tree(parsed)
+
+    def _build_two_level_tree(self, parsed: list[dict]) -> None:
+        groups: dict[str, QTreeWidgetItem] = {}
+        for p in parsed:
+            group = groups.get(p["browser"])
             if group is None:
-                group = QTreeWidgetItem(self._tree, [browser, ""])
+                group = QTreeWidgetItem(self._tree, [p["browser"], ""])
                 font = group.font(0)
                 font.setBold(True)
                 group.setFont(0, font)
-                groups[browser] = group
+                groups[p["browser"]] = group
                 group.setExpanded(True)
-            count = sum(eval(row["summary"]).values()) if row["summary"] else 0  # safe: our JSON
-            leaf = QTreeWidgetItem(group, [row["name"], str(count)])
-            leaf.setData(0, Qt.UserRole, int(row["id"]))
-            leaf.setToolTip(0, row["path"])
-        # Aggregate browser-level counts.
+            self._add_profile_leaf(group, p)
+        # Aggregate browser-level totals.
         for group in groups.values():
-            total = sum(int(group.child(i).text(1) or 0) for i in range(group.childCount()))
+            total = sum(int(group.child(i).text(1) or 0)
+                        for i in range(group.childCount()))
             group.setText(1, str(total))
+
+    def _build_three_level_tree(self, parsed: list[dict]) -> None:
+        # User → Browser → Profile. Bold for users, italic for browsers.
+        user_nodes: dict[str, QTreeWidgetItem] = {}
+        browser_nodes: dict[tuple[str, str], QTreeWidgetItem] = {}
+        for p in parsed:
+            user_key = p["user"]
+            user_label = user_key or tr("Equipo local")
+            user_node = user_nodes.get(user_key)
+            if user_node is None:
+                user_node = QTreeWidgetItem(self._tree, [user_label, ""])
+                font = user_node.font(0)
+                font.setBold(True)
+                font.setPointSize(font.pointSize() + 1)
+                user_node.setFont(0, font)
+                user_node.setToolTip(0, tr("Cuenta de Windows: ") + user_label)
+                user_nodes[user_key] = user_node
+                user_node.setExpanded(True)
+
+            browser_key = (user_key, p["browser"])
+            browser_node = browser_nodes.get(browser_key)
+            if browser_node is None:
+                browser_node = QTreeWidgetItem(user_node, [p["browser"], ""])
+                font = browser_node.font(0)
+                font.setItalic(True)
+                browser_node.setFont(0, font)
+                browser_nodes[browser_key] = browser_node
+                browser_node.setExpanded(True)
+            self._add_profile_leaf(browser_node, p)
+
+        # Aggregate counts up the tree (browser totals + user totals).
+        for browser_node in browser_nodes.values():
+            total = sum(int(browser_node.child(i).text(1) or 0)
+                        for i in range(browser_node.childCount()))
+            browser_node.setText(1, str(total))
+        for user_node in user_nodes.values():
+            total = sum(int(user_node.child(i).text(1) or 0)
+                        for i in range(user_node.childCount()))
+            user_node.setText(1, str(total))
+
+    def _add_profile_leaf(self, parent_node: QTreeWidgetItem, p: dict) -> None:
+        label = p["profile_part"]
+        if p["snapshot"]:
+            label = f"{label}  ·  snapshot {p['snapshot']}"
+        leaf = QTreeWidgetItem(parent_node, [label, str(p["count"])])
+        leaf.setData(0, Qt.UserRole, p["id"])
+        leaf.setToolTip(0, p["path"])
+        if p["snapshot"]:
+            # Visual hint that this row is a recovered snapshot rather
+            # than the live profile state.
+            font = leaf.font(0)
+            font.setItalic(True)
+            leaf.setFont(0, font)
 
     def _on_tree_selection(self) -> None:
         items = self._tree.selectedItems()
@@ -913,7 +1100,7 @@ class MainWindow(QMainWindow):
         # Only XLSX consumes the store + extras path today. Other formats
         # use the legacy signature so we don't break their behaviour.
         export_kwargs = {"kinds": dialog.selected_kinds}
-        if dialog.selected_format == "xlsx":
+        if dialog.selected_format in ("xlsx", "xlsx_review", "xlsx_dummy"):
             export_kwargs["store"] = self._session.store
             export_kwargs["extras"] = dialog.selected_extras
             export_kwargs["profile_ids"] = (

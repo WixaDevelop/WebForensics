@@ -35,18 +35,27 @@ from ui.i18n import tr
 
 
 class BitLockerCredentialsDialog(QDialog):
-    """Modal dialog for supplying BitLocker unlock credentials."""
+    """Modal dialog for supplying BitLocker unlock credentials.
+
+    *libbde_compatible* lets the caller signal that the underlying
+    libbde-based unlock backend recognised the volume's metadata
+    format. When ``False`` the dialog shows a warning explaining that
+    the unlock may still fail even if the credentials are correct (the
+    user can decide whether to try anyway).
+    """
 
     def __init__(
         self,
         partitions: list[BitLockerPartition],
         parent=None,
+        libbde_compatible: bool = True,
     ) -> None:
         super().__init__(parent)
         self._partitions = partitions
         self._credentials: Optional[BitLockerCredentials] = None
+        self._libbde_compatible = libbde_compatible
         self.setWindowTitle(tr("BitLocker partition detected"))
-        self.resize(560, 360)
+        self.resize(580, 420)
         self._build_ui()
 
     @property
@@ -68,6 +77,25 @@ class BitLockerCredentialsDialog(QDialog):
                 f"  • {part.description or 'partition'}  —  "
                 f"{size_gb:.1f} GiB  (addr={part.addr}, offset=0x{part.byte_offset:x})"
             ))
+
+        # If the format is libbde-incompatible (Win11 22H2+ typically),
+        # warn the analyst that the unlock attempt may fail even with a
+        # valid key — and that an external mount workflow remains the
+        # guaranteed path.
+        if not self._libbde_compatible:
+            warning = QLabel(tr(
+                "Aviso: el formato de BitLocker de esta imagen es muy reciente "
+                "(Win11 22H2+) y libbde no lo soporta todavía. "
+                "Ingresa la clave de todos modos — la app probará un parser "
+                "nativo como respaldo. Si tampoco funciona, te ofrecerá "
+                "automáticamente el flujo de montaje externo después."
+            ))
+            warning.setWordWrap(True)
+            warning.setStyleSheet(
+                "padding: 6px; border: 1px solid #C49000; "
+                "background-color: #FFF8E1; color: #5C4400;"
+            )
+            layout.addWidget(warning)
 
         form = QFormLayout()
         layout.addLayout(form)
