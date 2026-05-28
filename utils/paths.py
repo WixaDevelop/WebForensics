@@ -140,11 +140,82 @@ def firefox_profiles_dirs() -> List[Path]:
     return [Path.home() / ".mozilla" / "firefox"]
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _has_sqlite_magic(path: Path) -> bool:
+    """Return True when *path* starts with the standard SQLite header.
+
+    The SQLite header is invariant — every real Chrome / Firefox DB has
+    it, and decoy files (a random ``History`` placeholder, a stale
+    forensic export saved as text, etc.) almost never do. Reading 16
+    bytes is cheap and lets the recursive scanner reject false positives
+    without an expensive ``open_browser_db`` round-trip.
+    """
+    try:
+        with path.open("rb") as fh:
+            return fh.read(16) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
 def is_chromium_profile_dir(path: Path) -> bool:
     """A Chromium profile directory contains a ``History`` SQLite file."""
-    return path.is_dir() and (path / "History").is_file()
+    if not path.is_dir():
+        return False
+    history = path / "History"
+    if not history.is_file():
+        return False
+    return _has_sqlite_magic(history)
 
 
 def is_firefox_profile_dir(path: Path) -> bool:
     """Firefox profile directories contain ``places.sqlite``."""
-    return path.is_dir() and (path / "places.sqlite").is_file()
+    if not path.is_dir():
+        return False
+    places = path / "places.sqlite"
+    if not places.is_file():
+        return False
+    return _has_sqlite_magic(places)
+
+
+# Browser names that may appear as path components in installed / staged
+# profile trees. Order matters: longer / more specific names first.
+_BROWSER_PATH_HINTS: tuple[tuple[str, str], ...] = (
+    ("opera gx",        "Opera GX"),
+    ("operagx",         "Opera GX"),
+    ("opera software",  "Opera"),
+    ("opera stable",    "Opera"),
+    ("opera",           "Opera"),
+    ("tor browser",     "Tor Browser"),
+    ("torbrowser",      "Tor Browser"),
+    ("microsoft\\edge", "Edge"),
+    ("microsoft/edge",  "Edge"),
+    ("msedge",          "Edge"),
+    ("edge",            "Edge"),
+    ("bravesoftware",   "Brave"),
+    ("brave-browser",   "Brave"),
+    ("brave",           "Brave"),
+    ("vivaldi",         "Vivaldi"),
+    ("chromium",        "Chrome"),
+    ("google\\chrome",  "Chrome"),
+    ("google/chrome",   "Chrome"),
+    ("chrome",          "Chrome"),
+    ("mozilla\\firefox", "Firefox"),
+    ("mozilla/firefox",  "Firefox"),
+    ("firefox",         "Firefox"),
+)
+
+
+def infer_browser_from_path(path: Path) -> str | None:
+    """Best-effort browser-name inference from path components.
+
+    Returns ``None`` when nothing matches so callers can apply their own
+    default (e.g. "Chrome" for Chromium-shaped profiles, "Firefox" for
+    places.sqlite-shaped profiles).
+    """
+    needle = str(path).lower()
+    for token, label in _BROWSER_PATH_HINTS:
+        if token in needle:
+            return label
+    return None

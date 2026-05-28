@@ -72,6 +72,10 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,  # drop a build/icon.ico in here once you have one
+    # Embed a requireAdministrator manifest so double-clicking the .exe
+    # always triggers UAC. Needed for manage-bde, Arsenal Image Mounter,
+    # OSFMount and vssadmin paths inside the app.
+    uac_admin=True,
 )
 
 coll = COLLECT(

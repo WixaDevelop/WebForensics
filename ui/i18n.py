@@ -21,6 +21,61 @@ _TABLE: dict[str, dict[str, str]] = {
     # ── Toolbar / menu actions ────────────────────────────────────────────
     "Auto-detect":       {"es": "Auto-detectar"},
     "Open profile…":     {"es": "Abrir perfil…"},
+    "Auto-detect in folder…":     {"es": "Auto-detectar en carpeta…"},
+    "Recursively scan a folder for browser profiles":
+        {"es": "Escanear recursivamente una carpeta en busca de perfiles"},
+    "Select folder to scan": {"es": "Selecciona la carpeta a escanear"},
+    "Scanning folder…":      {"es": "Escaneando carpeta…"},
+
+    # ── Folder scan results dialog ───────────────────────────────────────
+    "Folder scan results":   {"es": "Resultados del escaneo"},
+    "Found {total} profile(s) under {folder}\n  • {primary} primary browser profile(s)\n  • {embedded} embedded WebView2 / CEF profile(s) (apps with built-in browsers)\n\nTick the profiles you want to extract. Embedded profiles can hold tokens, cookies and history from the host app's auth flows.":
+        {"es": "Se encontraron {total} perfil(es) en {folder}\n  • {primary} perfil(es) de navegador principal\n  • {embedded} perfil(es) WebView2 / CEF embebidos (apps con navegador integrado)\n\nMarca los perfiles que quieres extraer. Los embebidos pueden contener tokens, cookies e historial de los flujos de autenticación de la app contenedora."},
+    "Select all":            {"es": "Seleccionar todo"},
+    "Primary only":          {"es": "Solo principales"},
+    "Select none":           {"es": "Deseleccionar todo"},
+    "Primary browsers":      {"es": "Navegadores principales"},
+    "Embedded WebView / CEF profiles": {"es": "Perfiles WebView / CEF embebidos"},
+    "Path":                  {"es": "Ruta"},
+
+    # ── VSS prompt ──────────────────────────────────────────────────────
+    "Include VSS shadow copies?": {"es": "¿Incluir VSS shadow copies?"},
+    "Windows reports {n} Volume Shadow Copy/copies on {drive}.\nThese are point-in-time snapshots that may contain pristine copies of browser profiles from earlier dates — useful when the live profile has been wiped or rolled forward.\n\nInclude them in the scan? (one extra pass per snapshot)":
+        {"es": "Windows reporta {n} VSS snapshot(s) en {drive}.\nSon copias del volumen tomadas en momentos pasados que pueden contener perfiles de navegador en estados anteriores — útil cuando el perfil en vivo fue borrado o sobreescrito.\n\n¿Incluirlas en el escaneo? (una pasada extra por snapshot)"},
+    "Folder scan failed":    {"es": "Fallo al escanear la carpeta"},
+    "No profiles found":     {"es": "No se encontraron perfiles"},
+    "No profiles found in image": {"es": "No se encontraron perfiles en la imagen"},
+
+    # ── BitLocker dialog ─────────────────────────────────────────────────
+    "BitLocker partition detected": {"es": "Partición BitLocker detectada"},
+    "One or more partitions in this image are encrypted with BitLocker. Supply at least one credential below to unlock them.":
+        {"es": "Una o más particiones de esta imagen están cifradas con BitLocker. Proporcione al menos una credencial para desbloquearlas."},
+    "Password:":          {"es": "Contraseña:"},
+    "User/login password": {"es": "Contraseña de usuario/login"},
+    "Recovery key:":      {"es": "Clave de recuperación:"},
+    "48-digit recovery key (with or without dashes)":
+        {"es": "Clave de recuperación de 48 dígitos (con o sin guiones)"},
+    "Startup key:":       {"es": "Clave de inicio:"},
+    "Path to a .bek startup key file":
+        {"es": "Ruta a un archivo de clave de inicio .bek"},
+    "Browse…":            {"es": "Examinar…"},
+    "Select BitLocker startup key (.bek)":
+        {"es": "Selecciona el archivo de clave de inicio (.bek)"},
+    "FVEK (hex):":        {"es": "FVEK (hex):"},
+    "Full volume encryption key (hex, optional)":
+        {"es": "Clave de cifrado de volumen completo (hex, opcional)"},
+    "Skip BitLocker":     {"es": "Omitir BitLocker"},
+    "Continue without unlocking — only readable partitions will be scanned.":
+        {"es": "Continuar sin desbloquear — solo se escanearán las particiones legibles."},
+    "Open failed":        {"es": "Error al abrir"},
+    "BitLocker format not supported by libbde":
+        {"es": "Formato BitLocker no soportado por libbde"},
+    "This image contains a BitLocker-encrypted partition ({size:.1f} GiB) that uses a newer format libbde cannot parse yet.\n\nRecommended workflow:\n1. Mount the image with Arsenal Image Mounter, OSFMount or FTK Imager (read-only).\n2. In Windows, right-click the BitLocker partition → \"Unlock drive…\" → enter your recovery key.\n3. Back here, use \"Auto-detect in folder…\" and point it at the mounted drive root (e.g. F:\\).\n\nlibbde error: {err}\n\nContinue scanning the readable partitions of this image anyway?":
+        {"es": "Esta imagen contiene una partición cifrada con BitLocker ({size:.1f} GiB) que usa un formato más nuevo que libbde todavía no sabe leer (Win11 22H2+).\n\nFlujo recomendado:\n1. Monta la imagen con Arsenal Image Mounter, OSFMount o FTK Imager (sólo lectura).\n2. En Windows, clic derecho sobre la partición BitLocker → \"Desbloquear unidad…\" → introduce la recovery key.\n3. Vuelve aquí y usa \"Auto-detectar en carpeta…\" apuntando a la raíz de la unidad montada (ej. F:\\).\n4. Opcional: si quieres escanear también VSS snapshots de la imagen, expón los con 'vshadow.exe -el=<id>' o 'vssadmin list shadows' tras montar.\n\nError de libbde: {err}\n\n¿Continuar escaneando las particiones legibles de esta imagen de todos modos?"},
+    "No browser profiles could be staged from this image.\n\nDiagnostic details:\n\n{details}":
+        {"es": "No se pudieron extraer perfiles de navegador de esta imagen.\n\nDetalle del diagnóstico:\n\n{details}"},
+    "No browser profiles were detected anywhere under:\n\n{folder}\n\nThe scanner looked for Chromium (History) and Firefox/Tor (places.sqlite) signature files.":
+        {"es": "No se detectaron perfiles de navegador bajo:\n\n{folder}\n\nEl escáner buscó archivos firma de Chromium (History) y Firefox/Tor (places.sqlite)."},
     "Open image (E01)…": {"es": "Abrir imagen (E01)…"},
     "Search":            {"es": "Buscar"},
     "Export…":           {"es": "Exportar…"},

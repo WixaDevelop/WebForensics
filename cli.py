@@ -192,6 +192,10 @@ def _infer_format(explicit: str, out_path: Path) -> str:
         return "html"
     if suffix == ".json":
         return "json"
+    if suffix == ".xlsx":
+        return "xlsx"
+    if suffix == ".jsonld":
+        return "case"
     if out_path.is_dir() or suffix == "":
         return "csv"
     return "json"

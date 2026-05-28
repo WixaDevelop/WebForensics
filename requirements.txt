@@ -2,10 +2,13 @@
 PyQt5>=5.15
 pycryptodome>=3.20
 pywin32>=306; platform_system == "Windows"
+openpyxl>=3.1
 
 # Forensic image support (optional but expected by Open image…)
 pytsk3>=20240122
 libewf-python>=20240506
+libbde-python>=20240502
+libvshadow-python>=20240504
 
 # Build
 pyinstaller>=6.0
